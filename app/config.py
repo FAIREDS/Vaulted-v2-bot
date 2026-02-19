@@ -667,8 +667,8 @@ class Settings(BaseSettings):
     WEB_API_PORT: int = 8080
     WEB_API_WORKERS: int = 1
     WEB_API_ALLOWED_ORIGINS: str = '*'
+    WEB_API_FORWARDED_ALLOW_IPS: str = '*'
     WEB_API_DOCS_ENABLED: bool = False
-    FORWARDED_ALLOW_IPS: str = '*'
     WEB_API_TITLE: str = 'Remnawave Bot Admin API'
     WEB_API_VERSION: str = '1.0.0'
     WEB_API_DEFAULT_TOKEN: str | None = None
