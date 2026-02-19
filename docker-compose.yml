@@ -10,7 +10,10 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
-      - dokploy-network
+      bot-internal:
+      dokploy-network:
+        aliases:
+          - postgres
     healthcheck:
       test:
         [
@@ -29,7 +32,10 @@ services:
     volumes:
       - redis_data:/data
     networks:
-      - dokploy-network
+      bot-internal:
+      dokploy-network:
+        aliases:
+          - redis
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 30s
@@ -75,7 +81,10 @@ services:
       - traefik.http.routers.${COMPOSE_PROJECT_NAME:-remnawave-bot}.tls.certresolver=letsencrypt
       - traefik.http.services.${COMPOSE_PROJECT_NAME:-remnawave-bot}.loadbalancer.server.port=8080
     networks:
-      - dokploy-network
+      bot-internal:
+      dokploy-network:
+        aliases:
+          - bot
     healthcheck:
       test:
         [
@@ -94,5 +103,7 @@ volumes:
     driver: local
 
 networks:
+  bot-internal:
+    driver: bridge
   dokploy-network:
     external: true
