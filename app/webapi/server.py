@@ -58,8 +58,6 @@ class WebAPIServer:
             app=self._app,
             host=settings.WEB_API_HOST,
             port=int(settings.WEB_API_PORT or 8080),
-            proxy_headers=True,
-            forwarded_allow_ips=settings.WEB_API_FORWARDED_ALLOW_IPS,
             log_level='warning',
             workers=workers,
             lifespan='on',
