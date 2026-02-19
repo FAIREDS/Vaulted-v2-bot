@@ -63,6 +63,8 @@ class WebAPIServer:
             lifespan='on',
             access_log=False,
             log_config=log_config,
+            proxy_headers=True,
+            forwarded_allow_ips=settings.FORWARDED_ALLOW_IPS or '*',
         )
         self._server = uvicorn.Server(self._config)
         self._task: asyncio.Task[None] | None = None
