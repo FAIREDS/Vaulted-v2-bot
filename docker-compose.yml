@@ -54,18 +54,18 @@ services:
       - .env
     environment:
       FORCE_COLOR: '1'
-      DOCKER_ENV: 'true'
-      DATABASE_MODE: 'auto'
-      DATABASE_URL: ''
+      DOCKER_ENV: '${DOCKER_ENV:-true}'
+      DATABASE_MODE: '${DATABASE_MODE:-auto}'
+      DATABASE_URL: '${DATABASE_URL:-}'
       WEB_API_ENABLED: '${WEB_API_ENABLED:-true}'
-      POSTGRES_HOST: 'postgres'
-      POSTGRES_PORT: '5432'
+      POSTGRES_HOST: '${POSTGRES_HOST:-postgres}'
+      POSTGRES_PORT: '${POSTGRES_PORT:-5432}'
       POSTGRES_DB: '${POSTGRES_DB:-remnawave_bot}'
       POSTGRES_USER: '${POSTGRES_USER:-remnawave_user}'
       POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:-secure_password_123}'
       WEB_API_FORWARDED_ALLOW_IPS: '${WEB_API_FORWARDED_ALLOW_IPS:-*}'
 
-      REDIS_URL: 'redis://redis:6379/0'
+      REDIS_URL: '${REDIS_URL:-redis://redis:6379/0}'
 
       TZ: 'Europe/Moscow'
       LOCALES_PATH: '${LOCALES_PATH:-/app/locales}'
