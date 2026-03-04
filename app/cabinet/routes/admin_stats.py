@@ -26,7 +26,7 @@ from app.database.models import (
 from app.services.remnawave_service import RemnaWaveService
 from app.services.version_service import version_service
 
-from ..dependencies import get_cabinet_db, get_current_admin_user
+from ..dependencies import get_cabinet_db, require_permission
 
 
 logger = structlog.get_logger(__name__)
@@ -246,7 +246,7 @@ class RecentPaymentsResponse(BaseModel):
 
 @router.get('/dashboard', response_model=DashboardStats)
 async def get_dashboard_stats(
-    admin: User = Depends(get_current_admin_user),
+    admin: User = Depends(require_permission('stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ):
     """Get complete dashboard statistics for admin panel."""
@@ -326,7 +326,7 @@ async def get_dashboard_stats(
 
 @router.get('/system-info', response_model=SystemInfoResponse)
 async def get_system_info(
-    admin: User = Depends(get_current_admin_user),
+    admin: User = Depends(require_permission('stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ):
     """Get system information for admin dashboard."""
@@ -358,7 +358,7 @@ async def get_system_info(
 
 @router.get('/nodes', response_model=NodesOverview)
 async def get_nodes_status(
-    admin: User = Depends(get_current_admin_user),
+    admin: User = Depends(require_permission('stats:read')),
 ):
     """Get status of all nodes."""
     try:
@@ -374,7 +374,7 @@ async def get_nodes_status(
 @router.post('/nodes/{node_uuid}/restart')
 async def restart_node(
     node_uuid: str,
-    admin: User = Depends(get_current_admin_user),
+    admin: User = Depends(require_permission('remnawave:manage')),
 ):
     """Restart a node."""
     try:
@@ -401,7 +401,7 @@ async def restart_node(
 @router.post('/nodes/{node_uuid}/toggle')
 async def toggle_node(
     node_uuid: str,
-    admin: User = Depends(get_current_admin_user),
+    admin: User = Depends(require_permission('remnawave:manage')),
 ):
     """Enable or disable a node."""
     try:
@@ -596,7 +596,7 @@ async def _get_tariff_stats(db: AsyncSession) -> TariffStats | None:
 @router.get('/referrals/top', response_model=TopReferrersResponse)
 async def get_top_referrers(
     limit: int = 20,
-    admin: User = Depends(get_current_admin_user),
+    admin: User = Depends(require_permission('stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ):
     """Get top referrers with earnings breakdown by period."""
@@ -686,53 +686,6 @@ async def get_top_referrers(
             if row.referrer_id in referrers_data:
                 referrers_data[row.referrer_id]['earnings_month'] = row.total or 0
 
-        # Also add REFERRAL_REWARD transactions
-        trans_total_query = await db.execute(
-            select(Transaction.user_id.label('referrer_id'), func.sum(Transaction.amount_kopeks).label('total'))
-            .where(Transaction.type == TransactionType.REFERRAL_REWARD.value)
-            .group_by(Transaction.user_id)
-        )
-        for row in trans_total_query:
-            if row.referrer_id in referrers_data:
-                referrers_data[row.referrer_id]['earnings_total'] = referrers_data[row.referrer_id].get(
-                    'earnings_total', 0
-                ) + (row.total or 0)
-
-        trans_today_query = await db.execute(
-            select(Transaction.user_id.label('referrer_id'), func.sum(Transaction.amount_kopeks).label('total'))
-            .where(
-                and_(Transaction.type == TransactionType.REFERRAL_REWARD.value, Transaction.created_at >= today_start)
-            )
-            .group_by(Transaction.user_id)
-        )
-        for row in trans_today_query:
-            if row.referrer_id in referrers_data:
-                referrers_data[row.referrer_id]['earnings_today'] = referrers_data[row.referrer_id].get(
-                    'earnings_today', 0
-                ) + (row.total or 0)
-
-        trans_week_query = await db.execute(
-            select(Transaction.user_id.label('referrer_id'), func.sum(Transaction.amount_kopeks).label('total'))
-            .where(and_(Transaction.type == TransactionType.REFERRAL_REWARD.value, Transaction.created_at >= week_ago))
-            .group_by(Transaction.user_id)
-        )
-        for row in trans_week_query:
-            if row.referrer_id in referrers_data:
-                referrers_data[row.referrer_id]['earnings_week'] = referrers_data[row.referrer_id].get(
-                    'earnings_week', 0
-                ) + (row.total or 0)
-
-        trans_month_query = await db.execute(
-            select(Transaction.user_id.label('referrer_id'), func.sum(Transaction.amount_kopeks).label('total'))
-            .where(and_(Transaction.type == TransactionType.REFERRAL_REWARD.value, Transaction.created_at >= month_ago))
-            .group_by(Transaction.user_id)
-        )
-        for row in trans_month_query:
-            if row.referrer_id in referrers_data:
-                referrers_data[row.referrer_id]['earnings_month'] = referrers_data[row.referrer_id].get(
-                    'earnings_month', 0
-                ) + (row.total or 0)
-
         # Get user info for all referrers
         referrer_ids = list(referrers_data.keys())
         if referrer_ids:
@@ -812,7 +765,7 @@ async def get_top_referrers(
 @router.get('/campaigns/top', response_model=TopCampaignsResponse)
 async def get_top_campaigns(
     limit: int = 20,
-    admin: User = Depends(get_current_admin_user),
+    admin: User = Depends(require_permission('stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ):
     """Get top advertising campaigns with statistics."""
@@ -869,7 +822,7 @@ async def get_top_campaigns(
 @router.get('/payments/recent', response_model=RecentPaymentsResponse)
 async def get_recent_payments(
     limit: int = 50,
-    admin: User = Depends(get_current_admin_user),
+    admin: User = Depends(require_permission('stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ):
     """Get recent payments with user info."""

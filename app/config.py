@@ -66,8 +66,6 @@ class Settings(BaseSettings):
     ADMIN_REPORTS_TOPIC_ID: int | None = None
     ADMIN_REPORTS_SEND_TIME: str | None = None
 
-    CHANNEL_SUB_ID: str | None = None
-    CHANNEL_LINK: str | None = None
     CHANNEL_IS_REQUIRED_SUB: bool = False
     CHANNEL_DISABLE_TRIAL_ON_UNSUBSCRIBE: bool = True
     CHANNEL_REQUIRED_FOR_ALL: bool = False
@@ -136,6 +134,7 @@ class Settings(BaseSettings):
     DEFAULT_DEVICE_LIMIT: int = 1
     DEFAULT_TRAFFIC_RESET_STRATEGY: str = 'MONTH'
     RESET_TRAFFIC_ON_PAYMENT: bool = False
+    RESET_TRAFFIC_ON_TARIFF_SWITCH: bool = True
     MAX_DEVICES_LIMIT: int = 20
 
     TRIAL_WARNING_HOURS: int = 2
@@ -502,6 +501,11 @@ class Settings(BaseSettings):
     FREEKASSA_USE_API: bool = False
     # Публичный IP сервера для Freekassa API (если не задан - определяется автоматически)
     SERVER_PUBLIC_IP: str | None = None
+    # Раздельные методы оплаты Freekassa (отображаются как отдельные кнопки)
+    FREEKASSA_SBP_ENABLED: bool = False  # СБП (QR код) — i=44
+    FREEKASSA_SBP_DISPLAY_NAME: str = 'СБП (QR код)'
+    FREEKASSA_CARD_ENABLED: bool = False  # Карты РФ — i=36
+    FREEKASSA_CARD_DISPLAY_NAME: str = 'Карта РФ'
 
     # KassaAI (api.fk.life) - отдельная платёжка
     KASSA_AI_ENABLED: bool = False
@@ -676,7 +680,6 @@ class Settings(BaseSettings):
     WEB_API_TOKEN_HMAC_SECRET: str | None = None
     WEB_API_REQUEST_LOGGING: bool = True
 
-    APP_CONFIG_PATH: str = 'app-config.json'
     ENABLE_DEEP_LINKS: bool = True
     APP_CONFIG_CACHE_TTL: int = 3600
 
@@ -1383,13 +1386,6 @@ class Settings(BaseSettings):
                 return value
         return None
 
-    def get_app_config_path(self) -> str:
-        if os.path.isabs(self.APP_CONFIG_PATH):
-            return self.APP_CONFIG_PATH
-
-        project_root = Path(__file__).parent.parent
-        return str(project_root / self.APP_CONFIG_PATH)
-
     def is_deep_links_enabled(self) -> bool:
         return self.ENABLE_DEEP_LINKS
 
@@ -1535,8 +1531,8 @@ class Settings(BaseSettings):
             logger.warning('Некорректное значение DEVICES_SELECTION_DISABLED_AMOUNT', raw_value=raw_value)
             return None
 
-        if value < 0:
-            return 0
+        if value <= 0:
+            return None
 
         return value
 
@@ -1759,6 +1755,26 @@ class Settings(BaseSettings):
 
     def get_freekassa_display_name_html(self) -> str:
         return html.escape(self.get_freekassa_display_name())
+
+    def is_freekassa_sbp_enabled(self) -> bool:
+        return self.FREEKASSA_SBP_ENABLED and self.is_freekassa_enabled()
+
+    def get_freekassa_sbp_display_name(self) -> str:
+        name = (self.FREEKASSA_SBP_DISPLAY_NAME or '').strip()
+        return name if name else 'СБП (QR код)'
+
+    def get_freekassa_sbp_display_name_html(self) -> str:
+        return html.escape(self.get_freekassa_sbp_display_name())
+
+    def is_freekassa_card_enabled(self) -> bool:
+        return self.FREEKASSA_CARD_ENABLED and self.is_freekassa_enabled()
+
+    def get_freekassa_card_display_name(self) -> str:
+        name = (self.FREEKASSA_CARD_DISPLAY_NAME or '').strip()
+        return name if name else 'Карта РФ'
+
+    def get_freekassa_card_display_name_html(self) -> str:
+        return html.escape(self.get_freekassa_card_display_name())
 
     def is_kassa_ai_enabled(self) -> bool:
         return (

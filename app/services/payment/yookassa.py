@@ -15,9 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.models import PaymentMethod, TransactionType
-from app.services.subscription_auto_purchase_service import (
-    auto_purchase_saved_cart_after_topup,
-)
 from app.utils.payment_logger import payment_logger as logger
 from app.utils.user_utils import format_referrer_info
 
@@ -258,7 +255,7 @@ class YooKassaPaymentMixin:
                 status=yookassa_response['status'],
                 confirmation_url=yookassa_response.get('confirmation_url'),  # Используем confirmation URL
                 metadata_json=payment_metadata,
-                payment_method_type='bank_card',
+                payment_method_type='sbp',
                 yookassa_created_at=None,
                 test_mode=yookassa_response.get('test_mode', False),
             )
@@ -823,93 +820,15 @@ class YooKassaPaymentMixin:
 
                     # Проверяем наличие сохраненной корзины для возврата к оформлению подписки
                     # ВАЖНО: этот код должен выполняться даже при ошибках в уведомлениях
-                    logger.info('Проверяем наличие сохраненной корзины для пользователя', user_id=user.id)
-                    from app.services.user_cart_service import user_cart_service
-
                     try:
-                        has_saved_cart = await user_cart_service.has_user_cart(user.id)
-                        logger.info(
-                            'Результат проверки корзины для пользователя',
-                            user_id=user.id,
-                            has_saved_cart=has_saved_cart,
+                        from app.services.payment.common import send_cart_notification_after_topup
+
+                        await send_cart_notification_after_topup(
+                            user, payment.amount_kopeks, db, getattr(self, 'bot', None)
                         )
-
-                        auto_purchase_success = False
-                        if has_saved_cart:
-                            try:
-                                auto_purchase_success = await auto_purchase_saved_cart_after_topup(
-                                    db,
-                                    user,
-                                    bot=getattr(self, 'bot', None),
-                                )
-                            except Exception as auto_error:
-                                logger.error(
-                                    'Ошибка автоматической покупки подписки для пользователя',
-                                    user_id=user.id,
-                                    auto_error=auto_error,
-                                    exc_info=True,
-                                )
-
-                            if auto_purchase_success:
-                                has_saved_cart = False
-
-                        if has_saved_cart and getattr(self, 'bot', None) and user.telegram_id:
-                            # Если у пользователя есть сохраненная корзина,
-                            # отправляем ему уведомление с кнопкой вернуться к оформлению
-                            from aiogram import types
-
-                            from app.localization.texts import get_texts
-
-                            texts = get_texts(user.language)
-                            cart_message = texts.BALANCE_TOPUP_CART_REMINDER_DETAILED.format(
-                                total_amount=settings.format_price(payment.amount_kopeks)
-                            )
-
-                            # Создаем клавиатуру с кнопками
-                            keyboard = types.InlineKeyboardMarkup(
-                                inline_keyboard=[
-                                    [
-                                        types.InlineKeyboardButton(
-                                            text=texts.RETURN_TO_SUBSCRIPTION_CHECKOUT,
-                                            callback_data='return_to_saved_cart',
-                                        )
-                                    ],
-                                    [
-                                        types.InlineKeyboardButton(
-                                            text='💰 Мой баланс',
-                                            callback_data='menu_balance',
-                                        )
-                                    ],
-                                    [
-                                        types.InlineKeyboardButton(
-                                            text='🏠 Главное меню',
-                                            callback_data='back_to_menu',
-                                        )
-                                    ],
-                                ]
-                            )
-
-                            await self.bot.send_message(
-                                chat_id=user.telegram_id,
-                                text=f'✅ Баланс пополнен на {settings.format_price(payment.amount_kopeks)}!\n\n'
-                                f'⚠️ <b>Важно:</b> Пополнение баланса не активирует подписку автоматически. '
-                                f'Обязательно активируйте подписку отдельно!\n\n'
-                                f'🔄 При наличии сохранённой корзины подписки и включенной автопокупке, '
-                                f'подписка будет приобретена автоматически после пополнения баланса.\n\n{cart_message}',
-                                reply_markup=keyboard,
-                            )
-                            logger.info(
-                                'Отправлено уведомление с кнопкой возврата к оформлению подписки пользователю',
-                                user_id=user.id,
-                            )
-                        else:
-                            logger.info(
-                                'У пользователя нет сохраненной корзины, бот недоступен или покупка уже выполнена',
-                                user_id=user.id,
-                            )
                     except Exception as e:
                         logger.error(
-                            'Критическая ошибка при работе с сохраненной корзиной для пользователя',
+                            'Ошибка при работе с сохраненной корзиной для пользователя',
                             user_id=user.id,
                             error=e,
                             exc_info=True,
@@ -959,10 +878,6 @@ class YooKassaPaymentMixin:
                             # Отправляем уведомление пользователю об активации подписки (только Telegram)
                             if getattr(self, 'bot', None) and user.telegram_id:
                                 from aiogram import types
-
-                                from app.localization.texts import get_texts
-
-                                texts = get_texts(user.language)
 
                                 success_message = (
                                     f'✅ <b>Подписка успешно активирована!</b>\n\n'
@@ -1079,14 +994,14 @@ class YooKassaPaymentMixin:
                     'Успешно обработан платеж YooKassa как покупка подписки: пользователь , сумма ₽',
                     yookassa_payment_id=payment.yookassa_payment_id,
                     user_id=payment.user_id,
-                    amount_kopeks=payment.amount_kopeks / 100,
+                    amount_rubles=payment.amount_kopeks / 100,
                 )
             else:
                 logger.info(
                     'Успешно обработан платеж YooKassa : пользователь пополнил баланс на ₽',
                     yookassa_payment_id=payment.yookassa_payment_id,
                     user_id=payment.user_id,
-                    amount_kopeks=payment.amount_kopeks / 100,
+                    amount_rubles=payment.amount_kopeks / 100,
                 )
 
             # Создаем чек через NaloGO (если NALOGO_ENABLED=true)

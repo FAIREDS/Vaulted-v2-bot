@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
 import math
 import re
 from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, ROUND_UP, Decimal, InvalidOperation
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -205,17 +203,6 @@ router = APIRouter()
 promo_code_service = PromoCodeService()
 renewal_service = SubscriptionRenewalService()
 
-# Кешированный Bot для проверки подписки на канал (снижает нагрузку)
-_channel_check_bot: Bot | None = None
-
-
-def _get_channel_check_bot() -> Bot:
-    """Получить или создать Bot для проверки подписки на канал."""
-    global _channel_check_bot
-    if _channel_check_bot is None:
-        _channel_check_bot = Bot(token=settings.BOT_TOKEN)
-    return _channel_check_bot
-
 
 _CRYPTOBOT_MIN_USD = 1.0
 _CRYPTOBOT_MAX_USD = 1000.0
@@ -237,57 +224,6 @@ def _get_tariff_monthly_price(tariff) -> int:
             return int(first_price * 30 / first_period)
 
     return 0
-
-
-@router.get('/app-config.json')
-async def get_app_config() -> dict[str, Any]:
-    data = _load_app_config_data()
-    if data is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='App config not found')
-
-    return data
-
-
-def _get_app_config_candidate_files() -> list[Path]:
-    seen: set[Path] = set()
-    candidates: list[Path] = []
-
-    def _add_candidate(path: Path) -> None:
-        resolved = path.resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            candidates.append(resolved)
-
-    cwd = Path.cwd()
-    _add_candidate(cwd / 'miniapp' / 'app-config.json')
-    _add_candidate(cwd / 'app-config.json')
-
-    current = Path(__file__).resolve()
-    for parent in current.parents:
-        _add_candidate(parent / 'miniapp' / 'app-config.json')
-        _add_candidate(parent / 'app-config.json')
-
-    _add_candidate(Path('/var/www/remnawave-miniapp/app-config.json'))
-
-    return candidates
-
-
-def _load_app_config_data() -> dict[str, Any] | None:
-    for path in _get_app_config_candidate_files():
-        if not path.is_file():
-            continue
-
-        try:
-            with path.open('r', encoding='utf-8') as file:
-                data = json.load(file)
-        except (OSError, json.JSONDecodeError) as error:
-            logger.warning('Failed to load app-config from', path=path, error=error)
-            continue
-
-        if isinstance(data, dict):
-            return data
-
-    return None
 
 
 _DECIMAL_ONE_HUNDRED = Decimal(100)
@@ -3100,26 +3036,21 @@ async def get_subscription_details(
         ) from None
 
     # Check required channel subscription
-    if settings.CHANNEL_IS_REQUIRED_SUB and settings.CHANNEL_SUB_ID:
-        try:
-            bot = _get_channel_check_bot()
-            chat_member = await bot.get_chat_member(chat_id=settings.CHANNEL_SUB_ID, user_id=telegram_id)
-            # Не закрываем сессию - бот переиспользуется
+    if settings.CHANNEL_IS_REQUIRED_SUB:
+        from app.services.channel_subscription_service import channel_subscription_service
 
-            if chat_member.status not in ['member', 'administrator', 'creator']:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={
-                        'code': 'channel_subscription_required',
-                        'message': 'Please subscribe to our channel to continue',
-                        'channel_link': settings.CHANNEL_LINK,
-                    },
-                )
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.warning('Failed to check channel subscription for user', telegram_id=telegram_id, error=e)
-            # Don't block user if check fails
+        channels_with_status = await channel_subscription_service.get_channels_with_status(telegram_id)
+        is_subscribed = all(ch['is_subscribed'] for ch in channels_with_status) if channels_with_status else True
+
+        if not is_subscribed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    'code': 'channel_subscription_required',
+                    'message': 'Please subscribe to the required channels to continue',
+                    'channels': channels_with_status,
+                },
+            )
 
     user = await get_user_by_telegram_id(db, telegram_id)
     purchase_url = (settings.MINIAPP_PURCHASE_URL or '').strip()
@@ -4154,6 +4085,11 @@ async def activate_promo_code(
         'expired': status.HTTP_410_GONE,
         'used': status.HTTP_409_CONFLICT,
         'already_used_by_user': status.HTTP_409_CONFLICT,
+        'no_subscription_for_days': status.HTTP_400_BAD_REQUEST,
+        'trial_subscription_not_eligible': status.HTTP_400_BAD_REQUEST,
+        'active_discount_exists': status.HTTP_409_CONFLICT,
+        'not_first_purchase': status.HTTP_400_BAD_REQUEST,
+        'daily_limit': status.HTTP_429_TOO_MANY_REQUESTS,
         'server_error': status.HTTP_500_INTERNAL_SERVER_ERROR,
     }
     message_map = {
@@ -4162,6 +4098,11 @@ async def activate_promo_code(
         'expired': 'Promo code expired',
         'used': 'Promo code already used',
         'already_used_by_user': 'Promo code already used by this user',
+        'no_subscription_for_days': 'This promo code requires an active or expired subscription',
+        'trial_subscription_not_eligible': 'This promo code is not available for trial subscriptions',
+        'active_discount_exists': 'You already have an active discount',
+        'not_first_purchase': 'This promo code is only available for first purchase',
+        'daily_limit': 'Too many promo code activations today',
         'user_not_found': 'User not found',
         'server_error': 'Failed to activate promo code',
     }
@@ -7027,8 +6968,16 @@ async def switch_tariff_endpoint(
     subscription.device_limit = new_tariff.device_limit
     subscription.connected_squads = squads
     # Сбрасываем докупленный трафик при смене тарифа
+    from sqlalchemy import delete as sql_delete
+
+    from app.database.models import TrafficPurchase
+
+    await db.execute(sql_delete(TrafficPurchase).where(TrafficPurchase.subscription_id == subscription.id))
     subscription.purchased_traffic_gb = 0
-    subscription.traffic_reset_at = None  # Сбрасываем дату сброса трафика
+    subscription.traffic_reset_at = None
+
+    if settings.RESET_TRAFFIC_ON_TARIFF_SWITCH:
+        subscription.traffic_used_gb = 0.0
 
     # Обработка daily полей при смене тарифа
     new_is_daily = getattr(new_tariff, 'is_daily', False)
@@ -7060,10 +7009,16 @@ async def switch_tariff_endpoint(
     await db.refresh(subscription)
     await db.refresh(user)
 
-    # Синхронизируем с RemnaWave
+    # Синхронизируем с RemnaWave (опционально сбрасываем трафик по настройке)
+    should_reset_traffic = settings.RESET_TRAFFIC_ON_TARIFF_SWITCH
     try:
         service = SubscriptionService()
-        await service.update_remnawave_user(db, subscription)
+        await service.update_remnawave_user(
+            db,
+            subscription,
+            reset_traffic=should_reset_traffic,
+            reset_reason='смена тарифа',
+        )
     except Exception as e:
         logger.error('Ошибка синхронизации с RemnaWave при смене тарифа', error=e)
 

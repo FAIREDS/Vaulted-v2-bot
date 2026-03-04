@@ -15,6 +15,7 @@ from app.database.crud.campaign import (
     get_campaign_by_start_parameter,
     get_campaign_registration_by_user,
 )
+from app.database.crud.rbac import UserRoleCRUD
 from app.database.crud.user import (
     clear_email_change_pending,
     create_user,
@@ -99,9 +100,17 @@ def _user_to_response(user: User) -> UserResponse:
     )
 
 
-def _create_auth_response(user: User) -> AuthResponse:
-    """Create full auth response with tokens."""
-    access_token = create_access_token(user.id, user.telegram_id)
+async def _create_auth_response(user: User, db: AsyncSession) -> AuthResponse:
+    """Create full auth response with tokens and RBAC permissions."""
+    user_permissions, user_role_names, user_role_level = await UserRoleCRUD.get_user_permissions(db, user.id)
+
+    access_token = create_access_token(
+        user.id,
+        user.telegram_id,
+        permissions=user_permissions,
+        roles=user_role_names,
+        role_level=user_role_level,
+    )
     refresh_token = create_refresh_token(user.id)
     expires_in = settings.get_cabinet_access_token_expire_minutes() * 60
 
@@ -149,6 +158,15 @@ async def _process_campaign_bonus(
     try:
         campaign = await get_campaign_by_start_parameter(db, campaign_slug, only_active=True)
         if not campaign:
+            return None
+
+        # Skip if user IS the campaign partner — prevent self-referral
+        if campaign.partner_user_id and campaign.partner_user_id == user.id:
+            logger.debug(
+                'Skipping campaign attribution: user is the campaign partner',
+                user_id=user.id,
+                campaign_id=campaign.id,
+            )
             return None
 
         # Lock user row to prevent concurrent bonus application (race condition)
@@ -413,7 +431,7 @@ async def auth_telegram(
     user.cabinet_last_login = datetime.now(UTC)
     await db.commit()
 
-    response = _create_auth_response(user)
+    response = await _create_auth_response(user, db)
 
     # Store refresh token
     await _store_refresh_token(db, user.id, response.refresh_token)
@@ -493,7 +511,7 @@ async def auth_telegram_widget(
     user.cabinet_last_login = datetime.now(UTC)
     await db.commit()
 
-    response = _create_auth_response(user)
+    response = await _create_auth_response(user, db)
     await _store_refresh_token(db, user.id, response.refresh_token)
 
     # Process referral code (before campaign bonus, which may also set referrer)
@@ -541,53 +559,61 @@ async def register_email(
             detail='You already have a verified email',
         )
 
-    # Generate verification token
-    verification_token = generate_verification_token()
-    verification_expires = get_verification_expires_at()
-
     # Update user
     user.email = request.email
-    user.email_verified = False
     user.password_hash = hash_password(request.password)
-    user.email_verification_token = verification_token
-    user.email_verification_expires = verification_expires
 
-    await db.commit()
+    if not settings.is_cabinet_email_verification_enabled():
+        # Верификация отключена — сразу помечаем email как verified
+        user.email_verified = True
+        user.email_verified_at = datetime.now(UTC)
+        await db.commit()
+    else:
+        # Generate verification token
+        verification_token = generate_verification_token()
+        verification_expires = get_verification_expires_at()
 
-    # Send verification email asynchronously (smtplib is blocking)
-    if settings.is_cabinet_email_verification_enabled() and email_service.is_configured():
-        cabinet_url = settings.CABINET_URL
-        verification_url = f'{cabinet_url}/verify-email'
-        lang = user.language or 'ru'
-        full_url = f'{verification_url}?token={verification_token}'
-        expire_hours = settings.get_cabinet_email_verification_expire_hours()
+        user.email_verified = False
+        user.email_verification_token = verification_token
+        user.email_verification_expires = verification_expires
+        await db.commit()
 
-        # Check for admin template override
-        override = await get_rendered_override(
-            'email_verification',
-            lang,
-            context={
-                'username': user.first_name or '',
-                'verification_url': full_url,
-                'expire_hours': str(expire_hours),
-            },
-            db=db,
-        )
-        custom_subject, custom_body = override if override else (None, None)
+        # Send verification email asynchronously (smtplib is blocking)
+        if email_service.is_configured():
+            cabinet_url = settings.CABINET_URL
+            verification_url = f'{cabinet_url}/verify-email'
+            lang = user.language or 'ru'
+            full_url = f'{verification_url}?token={verification_token}'
+            expire_hours = settings.get_cabinet_email_verification_expire_hours()
 
-        await asyncio.to_thread(
-            email_service.send_verification_email,
-            to_email=request.email,
-            verification_token=verification_token,
-            verification_url=verification_url,
-            username=user.first_name,
-            language=lang,
-            custom_subject=custom_subject,
-            custom_body_html=custom_body,
-        )
+            # Check for admin template override
+            override = await get_rendered_override(
+                'email_verification',
+                lang,
+                context={
+                    'username': user.first_name or '',
+                    'verification_url': full_url,
+                    'expire_hours': str(expire_hours),
+                },
+                db=db,
+            )
+            custom_subject, custom_body = override if override else (None, None)
+
+            await asyncio.to_thread(
+                email_service.send_verification_email,
+                to_email=request.email,
+                verification_token=verification_token,
+                verification_url=verification_url,
+                username=user.first_name,
+                language=lang,
+                custom_subject=custom_subject,
+                custom_body_html=custom_body,
+            )
 
     return {
-        'message': 'Verification email sent',
+        'message': 'Email linked successfully'
+        if not settings.is_cabinet_email_verification_enabled()
+        else 'Verification email sent',
         'email': request.email,
     }
 
@@ -667,12 +693,12 @@ async def register_email_standalone(
         referred_by_id=referrer.id if referrer else None,
     )
 
-    # Для тестового email - автоматически верифицировать
-    if is_test_email:
+    # Для тестового email или отключённой верификации - автоматически верифицировать
+    if is_test_email or not settings.is_cabinet_email_verification_enabled():
         user.email_verified = True
         user.email_verified_at = datetime.now(UTC)
         await db.commit()
-        logger.info('Test email auto-verified: user_id', email=request.email, user_id=user.id)
+        logger.info('Email auto-verified (test or verification disabled)', email=request.email, user_id=user.id)
     else:
         # Сгенерировать токен верификации
         verification_token = generate_verification_token()
@@ -725,11 +751,12 @@ async def register_email_standalone(
             # Не прерываем регистрацию из-за ошибки реферальной системы
 
     # Для тестового email - сразу можно логиниться (уже verified)
-    # Для обычного email - требуется верификация
+    # Для обычного email - требуется верификация (если включена)
+    verification_required = not is_test_email and settings.is_cabinet_email_verification_enabled()
     return RegisterResponse(
         message='Verification email sent. Please check your inbox.',
         email=request.email,
-        requires_verification=not is_test_email,
+        requires_verification=verification_required,
     )
 
 
@@ -768,7 +795,7 @@ async def verify_email(
     await _sync_subscription_from_panel_by_email(db, user)
 
     # Return auth tokens so user is logged in after verification
-    response = _create_auth_response(user)
+    response = await _create_auth_response(user, db)
     await _store_refresh_token(db, user.id, response.refresh_token)
 
     # Process campaign bonus
@@ -899,8 +926,8 @@ async def login_email(
             detail='Invalid email or password',
         )
 
-    # Test email bypasses verification check
-    if not user.email_verified and not is_test_email:
+    # Test email and disabled verification bypass the check
+    if not user.email_verified and not is_test_email and settings.is_cabinet_email_verification_enabled():
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail='Please verify your email first',
@@ -915,7 +942,7 @@ async def login_email(
     user.cabinet_last_login = datetime.now(UTC)
     await db.commit()
 
-    response = _create_auth_response(user)
+    response = await _create_auth_response(user, db)
     await _store_refresh_token(db, user.id, response.refresh_token)
 
     # Process campaign bonus
@@ -978,7 +1005,14 @@ async def refresh_token(
             detail='User not found or inactive',
         )
 
-    access_token = create_access_token(user.id, user.telegram_id)
+    user_permissions, user_role_names, user_role_level = await UserRoleCRUD.get_user_permissions(db, user.id)
+    access_token = create_access_token(
+        user.id,
+        user.telegram_id,
+        permissions=user_permissions,
+        roles=user_role_names,
+        role_level=user_role_level,
+    )
     expires_in = settings.get_cabinet_access_token_expire_minutes() * 60
 
     return TokenResponse(
@@ -1102,12 +1136,32 @@ async def get_current_user(
     return _user_to_response(user)
 
 
+@router.get('/me/permissions')
+async def get_my_permissions(
+    user: User = Depends(get_current_cabinet_user),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Get current user's RBAC permissions, roles, and level."""
+    from app.services.permission_service import PermissionService
+
+    return await PermissionService.get_user_permissions(db, user.id, user=user)
+
+
 @router.get('/me/is-admin')
 async def check_is_admin(
     user: User = Depends(get_current_cabinet_user),
+    db: AsyncSession = Depends(get_cabinet_db),
 ):
-    """Check if current user is an admin."""
+    """Check if current user is an admin (legacy config or RBAC)."""
+    # Legacy check: config-based admin list
     is_admin = settings.is_admin(telegram_id=user.telegram_id, email=user.email if user.email_verified else None)
+
+    if not is_admin:
+        # RBAC check: user has any active role with level > 0
+        _permissions, _role_names, max_level = await UserRoleCRUD.get_user_permissions(db, user.id)
+        if max_level > 0:
+            is_admin = True
+
     return {'is_admin': is_admin}
 
 

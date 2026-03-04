@@ -171,7 +171,7 @@ class BotConfigurationService:
         'MINIAPP': 'Mini App и кастомные ссылки.',
         'HAPP': 'Интеграция Happ и связанные ссылки.',
         'SKIP': 'Настройки быстрого старта и гайд по подключению.',
-        'ADDITIONAL': 'Конфигурация app-config.json, deep links и кеша.',
+        'ADDITIONAL': 'Конфигурация deep links и кеша.',
         'DATABASE': 'Режим работы базы данных и пути до файлов.',
         'POSTGRES': 'Параметры подключения к PostgreSQL.',
         'SQLITE': 'Файл SQLite и резервные параметры.',
@@ -205,8 +205,6 @@ class BotConfigurationService:
         'DATABASE_URL': 'DATABASE',
         'DATABASE_MODE': 'DATABASE',
         'LOCALES_PATH': 'LOCALIZATION',
-        'CHANNEL_SUB_ID': 'CHANNEL',
-        'CHANNEL_LINK': 'CHANNEL',
         'CHANNEL_IS_REQUIRED_SUB': 'CHANNEL',
         'BOT_USERNAME': 'CORE',
         'DEFAULT_LANGUAGE': 'LOCALIZATION',
@@ -222,6 +220,7 @@ class BotConfigurationService:
         'SALES_MODE': 'SUBSCRIPTIONS_CORE',
         'DEFAULT_TRAFFIC_RESET_STRATEGY': 'TRAFFIC',
         'RESET_TRAFFIC_ON_PAYMENT': 'TRAFFIC',
+        'RESET_TRAFFIC_ON_TARIFF_SWITCH': 'TRAFFIC',
         'TRAFFIC_SELECTION_MODE': 'TRAFFIC',
         'FIXED_TRAFFIC_LIMIT_GB': 'TRAFFIC',
         'AVAILABLE_SUBSCRIPTION_PERIODS': 'PERIODS',
@@ -297,7 +296,6 @@ class BotConfigurationService:
         'CABINET_BUTTON_STYLE': 'INTERFACE',
         'CONNECT_BUTTON_MODE': 'CONNECT_BUTTON',
         'MINIAPP_CUSTOM_URL': 'CONNECT_BUTTON',
-        'APP_CONFIG_PATH': 'ADDITIONAL',
         'ENABLE_DEEP_LINKS': 'ADDITIONAL',
         'APP_CONFIG_CACHE_TTL': 'ADDITIONAL',
         'INACTIVE_USER_DELETE_MONTHS': 'MAINTENANCE',
@@ -881,6 +879,24 @@ class BotConfigurationService:
             'description': 'Уведомления о подключении и отключении устройств.',
             'format': 'Булево значение.',
             'example': 'true',
+        },
+        'RESET_TRAFFIC_ON_TARIFF_SWITCH': {
+            'description': (
+                'Автоматически сбрасывает счётчик использованного трафика '
+                'при переключении пользователя на другой тарифный план. '
+                'Сброс происходит через RemnaWave API.'
+            ),
+            'format': 'Булево значение: выберите "Включить" или "Выключить".',
+            'example': 'Включено — трафик обнуляется при каждой смене тарифа.',
+            'warning': 'При отключении использованный трафик сохранится после смены тарифа.',
+        },
+        'RESET_TRAFFIC_ON_PAYMENT': {
+            'description': (
+                'Автоматически сбрасывает счётчик использованного трафика при любой оплате или продлении подписки.'
+            ),
+            'format': 'Булево значение: выберите "Включить" или "Выключить".',
+            'example': 'Выключено по умолчанию.',
+            'warning': 'При включении трафик будет обнуляться при каждом продлении подписки.',
         },
     }
 

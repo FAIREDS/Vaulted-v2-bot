@@ -65,16 +65,25 @@ def _apply_promo_discount(price: int, discount_percent: int) -> int:
 
 
 def _get_user_period_discount(db_user: User, period_days: int) -> int:
-    """Получает скидку пользователя на период из промогруппы."""
-    promo_group = getattr(db_user, 'promo_group', None)
+    """Получает скидку пользователя на период из промогруппы + промо-оффер (стекинг).
 
-    if promo_group:
-        discount = promo_group.get_discount_percent('period', period_days)
-        if discount > 0:
-            return discount
-
+    Возвращает итоговый процент скидки после последовательного применения
+    скидки промогруппы и персональной скидки промо-оффера.
+    """
+    promo_group = db_user.get_primary_promo_group()
+    group_discount = promo_group.get_discount_percent('period', period_days) if promo_group else 0
     personal_discount = get_user_active_promo_discount_percent(db_user)
-    return personal_discount
+
+    if group_discount <= 0 and personal_discount <= 0:
+        return 0
+
+    # Стекинг: применяем последовательно (как в кабинете)
+    # price * (1 - group/100) * (1 - personal/100)
+    # Вычисляем эффективный общий процент
+    remaining = (100 - group_discount) * (100 - personal_discount)
+    effective_discount = 100 - remaining // 100
+
+    return effective_discount
 
 
 def format_tariffs_list_text(
@@ -2265,7 +2274,7 @@ async def confirm_tariff_switch(
             await subscription_service.create_remnawave_user(
                 db,
                 subscription,
-                reset_traffic=True,
+                reset_traffic=settings.RESET_TRAFFIC_ON_TARIFF_SWITCH,
                 reset_reason='переключение тарифа',
             )
         except Exception as e:
@@ -2434,16 +2443,19 @@ async def confirm_daily_tariff_switch(
         subscription.purchased_traffic_gb = 0
         subscription.traffic_reset_at = None
 
+        if settings.RESET_TRAFFIC_ON_TARIFF_SWITCH:
+            subscription.traffic_used_gb = 0.0
+
         await db.commit()
         await db.refresh(subscription)
 
-        # Обновляем пользователя в Remnawave (create_remnawave_user также сбрасывает устройства)
+        # Обновляем пользователя в Remnawave (сброс трафика по админ-настройке)
         try:
             subscription_service = SubscriptionService()
             await subscription_service.create_remnawave_user(
                 db,
                 subscription,
-                reset_traffic=True,
+                reset_traffic=settings.RESET_TRAFFIC_ON_TARIFF_SWITCH,
                 reset_reason='смена на суточный тариф',
             )
         except Exception as e:
@@ -2702,11 +2714,12 @@ async def show_instant_switch_list(
         return
 
     # Рассчитываем оставшиеся дни
+    now = datetime.now(UTC)
     remaining_days = 0
     if subscription.end_date:
-        remaining_days = max(0, (subscription.end_date - datetime.now(UTC)).days)
+        remaining_days = max(0, (subscription.end_date - now).days)
 
-    if remaining_days == 0:
+    if not subscription.end_date or subscription.end_date <= now:
         await callback.message.edit_text(
             '❌ <b>Переключение недоступно</b>\n\n'
             'У вашей подписки не осталось активных дней.\n'
@@ -2987,6 +3000,9 @@ async def confirm_instant_switch(
         subscription.purchased_traffic_gb = 0
         subscription.traffic_reset_at = None
 
+        if settings.RESET_TRAFFIC_ON_TARIFF_SWITCH:
+            subscription.traffic_used_gb = 0.0
+
         if is_new_daily:
             # Для суточного тарифа - сбрасываем на 1 день и настраиваем суточные параметры
             daily_price = getattr(new_tariff, 'daily_price_kopeks', 0)
@@ -3013,13 +3029,13 @@ async def confirm_instant_switch(
         await db.commit()
         await db.refresh(subscription)
 
-        # Обновляем пользователя в Remnawave
+        # Обновляем пользователя в Remnawave (сброс трафика по админ-настройке)
         try:
             subscription_service = SubscriptionService()
             await subscription_service.create_remnawave_user(
                 db,
                 subscription,
-                reset_traffic=False,  # Не сбрасываем трафик при переключении
+                reset_traffic=settings.RESET_TRAFFIC_ON_TARIFF_SWITCH,
                 reset_reason='мгновенное переключение тарифа',
             )
         except Exception as e:
