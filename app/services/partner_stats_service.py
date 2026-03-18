@@ -9,6 +9,7 @@ import structlog
 from sqlalchemy import and_, case, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database.crud.transaction import REAL_PAYMENT_METHODS
 from app.database.models import (
     AdvertisingCampaignRegistration,
     ReferralEarning,
@@ -938,14 +939,16 @@ class PartnerStatsService:
         registrations_dict = {str(row.date): int(row.count) for row in registrations_by_day.all()}
 
         # --- Daily revenue (DAILY_STATS_DAYS days) ---
-        # Revenue = deposits (positive) + abs(subscription_payments) (stored negative)
+        # Revenue = real deposits only (exclude bonus/promo balance spending on subscriptions)
         revenue_amount_expr = func.coalesce(
             func.sum(
                 case(
-                    (Transaction.type == TransactionType.DEPOSIT.value, Transaction.amount_kopeks),
                     (
-                        Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
-                        func.abs(Transaction.amount_kopeks),
+                        and_(
+                            Transaction.type == TransactionType.DEPOSIT.value,
+                            Transaction.payment_method.in_(REAL_PAYMENT_METHODS),
+                        ),
+                        Transaction.amount_kopeks,
                     ),
                     else_=0,
                 )
@@ -963,12 +966,8 @@ class PartnerStatsService:
                     Transaction.user_id.in_(campaign_user_ids_sq),
                     Transaction.is_completed.is_(True),
                     Transaction.created_at >= start_date,
-                    Transaction.type.in_(
-                        [
-                            TransactionType.DEPOSIT.value,
-                            TransactionType.SUBSCRIPTION_PAYMENT.value,
-                        ]
-                    ),
+                    Transaction.type == TransactionType.DEPOSIT.value,
+                    Transaction.payment_method.in_(REAL_PAYMENT_METHODS),
                 )
             )
             .group_by(func.date(Transaction.created_at))
@@ -1019,12 +1018,8 @@ class PartnerStatsService:
                     Transaction.user_id.in_(campaign_user_ids_sq),
                     Transaction.is_completed.is_(True),
                     Transaction.created_at >= week_ago,
-                    Transaction.type.in_(
-                        [
-                            TransactionType.DEPOSIT.value,
-                            TransactionType.SUBSCRIPTION_PAYMENT.value,
-                        ]
-                    ),
+                    Transaction.type == TransactionType.DEPOSIT.value,
+                    Transaction.payment_method.in_(REAL_PAYMENT_METHODS),
                 )
             )
         )
@@ -1038,12 +1033,8 @@ class PartnerStatsService:
                     Transaction.is_completed.is_(True),
                     Transaction.created_at >= previous_start,
                     Transaction.created_at < week_ago,
-                    Transaction.type.in_(
-                        [
-                            TransactionType.DEPOSIT.value,
-                            TransactionType.SUBSCRIPTION_PAYMENT.value,
-                        ]
-                    ),
+                    Transaction.type == TransactionType.DEPOSIT.value,
+                    Transaction.payment_method.in_(REAL_PAYMENT_METHODS),
                 )
             )
         )
@@ -1070,7 +1061,13 @@ class PartnerStatsService:
                 func.coalesce(
                     func.sum(
                         case(
-                            (Transaction.type == TransactionType.DEPOSIT.value, Transaction.amount_kopeks),
+                            (
+                                and_(
+                                    Transaction.type == TransactionType.DEPOSIT.value,
+                                    Transaction.payment_method.in_(REAL_PAYMENT_METHODS),
+                                ),
+                                Transaction.amount_kopeks,
+                            ),
                             else_=0,
                         )
                     ),
@@ -1117,7 +1114,13 @@ class PartnerStatsService:
                 func.coalesce(
                     func.sum(
                         case(
-                            (Transaction.type == TransactionType.DEPOSIT.value, Transaction.amount_kopeks),
+                            (
+                                and_(
+                                    Transaction.type == TransactionType.DEPOSIT.value,
+                                    Transaction.payment_method.in_(REAL_PAYMENT_METHODS),
+                                ),
+                                Transaction.amount_kopeks,
+                            ),
                             (
                                 Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
                                 func.abs(Transaction.amount_kopeks),
@@ -1149,7 +1152,13 @@ class PartnerStatsService:
                     func.coalesce(
                         func.sum(
                             case(
-                                (Transaction.type == TransactionType.DEPOSIT.value, Transaction.amount_kopeks),
+                                (
+                                    and_(
+                                        Transaction.type == TransactionType.DEPOSIT.value,
+                                        Transaction.payment_method.in_(REAL_PAYMENT_METHODS),
+                                    ),
+                                    Transaction.amount_kopeks,
+                                ),
                                 (
                                     Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
                                     func.abs(Transaction.amount_kopeks),

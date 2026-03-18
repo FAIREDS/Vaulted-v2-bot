@@ -21,8 +21,8 @@ logger = structlog.get_logger(__name__)
 
 
 FREEKASSA_SUB_METHODS = {
-    'freekassa_sbp': {'payment_system_id': 44, 'get_name': lambda: settings.get_freekassa_sbp_display_name()},
-    'freekassa_card': {'payment_system_id': 36, 'get_name': lambda: settings.get_freekassa_card_display_name()},
+    'freekassa_sbp': {'payment_system_id': 44, 'get_name': settings.get_freekassa_sbp_display_name},
+    'freekassa_card': {'payment_system_id': 36, 'get_name': settings.get_freekassa_card_display_name},
 }
 
 
@@ -186,6 +186,7 @@ async def process_freekassa_payment_amount(
                 'PAYMENT_AMOUNT_TOO_LOW',
                 'Минимальная сумма пополнения: {min_amount}₽',
             ).format(min_amount=min_amount // 100),
+            reply_markup=get_back_keyboard(db_user.language),
             parse_mode='HTML',
         )
         return
@@ -196,6 +197,7 @@ async def process_freekassa_payment_amount(
                 'PAYMENT_AMOUNT_TOO_HIGH',
                 'Максимальная сумма пополнения: {max_amount}₽',
             ).format(max_amount=max_amount // 100),
+            reply_markup=get_back_keyboard(db_user.language),
             parse_mode='HTML',
         )
         return

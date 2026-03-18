@@ -103,7 +103,7 @@ async def get_sales_summary(
     days: int | None = Query(default=30, description='Preset period in days (7, 30, 90, 0=all)'),
     start_date: str | None = Query(default=None, description='Custom start date ISO format'),
     end_date: str | None = Query(default=None, description='Custom end date ISO format'),
-    admin: User = Depends(require_permission('stats:read')),
+    admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> SalesSummary:
     """Get summary statistics for sales dashboard cards."""
@@ -170,6 +170,7 @@ async def get_sales_summary(
         new_trials = row.new_trials or 0
 
         # Trial-to-paid conversion in period
+        # Method 1: SubscriptionConversion records (only created by some purchase flows)
         conversions_result = await db.execute(
             select(func.count(SubscriptionConversion.id)).where(
                 and_(
@@ -178,9 +179,29 @@ async def get_sales_summary(
                 )
             )
         )
-        conversions = conversions_result.scalar() or 0
-        # Cap at 100%: conversions from previous periods can exceed current new_trials
-        conversion_rate = min(round((conversions / new_trials * 100), 1), 100.0) if new_trials > 0 else 0.0
+        conversion_records = conversions_result.scalar() or 0
+
+        # Method 2: Users registered in period who have paid (catches all purchase flows)
+        converted_users_result = await db.execute(
+            select(func.count(User.id)).where(
+                and_(
+                    User.created_at >= period_start,
+                    User.created_at <= period_end,
+                    User.has_had_paid_subscription.is_(True),
+                )
+            )
+        )
+        converted_users = converted_users_result.scalar() or 0
+
+        # Use the higher count to catch conversions from all purchase flows
+        conversions = max(conversion_records, converted_users)
+
+        # new_trials only counts REMAINING trials (is_trial=True), but converted users
+        # had is_trial flipped to False. Add conversions back to get total trial starters.
+        total_trial_starters = new_trials + conversions
+        conversion_rate = (
+            min(round((conversions / total_trial_starters * 100), 1), 100.0) if total_trial_starters > 0 else 0.0
+        )
 
         # Renewals count
         renewals_subquery = (
@@ -272,7 +293,7 @@ async def get_trials_stats(
     days: int | None = Query(default=30),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
-    admin: User = Depends(require_permission('stats:read')),
+    admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> TrialsStatsResponse:
     """Get trial registration statistics with provider breakdown."""
@@ -290,6 +311,7 @@ async def get_trials_stats(
         )
         total_trials = total_result.scalar() or 0
 
+        # Conversion: SubscriptionConversion records + fallback to has_had_paid_subscription
         conversions_result = await db.execute(
             select(func.count(SubscriptionConversion.id)).where(
                 and_(
@@ -298,9 +320,25 @@ async def get_trials_stats(
                 )
             )
         )
-        conversions = conversions_result.scalar() or 0
-        # Cap at 100%: conversions from previous periods can exceed current period trials
-        conversion_rate = min(round((conversions / total_trials * 100), 1), 100.0) if total_trials > 0 else 0.0
+        conversion_records = conversions_result.scalar() or 0
+
+        converted_users_result = await db.execute(
+            select(func.count(User.id)).where(
+                and_(
+                    User.created_at >= period_start,
+                    User.created_at <= period_end,
+                    User.has_had_paid_subscription.is_(True),
+                )
+            )
+        )
+        converted_users = converted_users_result.scalar() or 0
+        conversions = max(conversion_records, converted_users)
+
+        # total_trials only counts remaining is_trial=True; add conversions for total starters
+        total_trial_starters = total_trials + conversions
+        conversion_rate = (
+            min(round((conversions / total_trial_starters * 100), 1), 100.0) if total_trial_starters > 0 else 0.0
+        )
 
         avg_duration_result = await db.execute(
             select(func.avg(SubscriptionConversion.trial_duration_days)).where(
@@ -465,7 +503,7 @@ async def get_sales_stats(
     days: int | None = Query(default=30),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
-    admin: User = Depends(require_permission('stats:read')),
+    admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> SalesStatsResponse:
     """Get subscription sales statistics."""
@@ -644,7 +682,7 @@ async def get_renewals_stats(
     days: int | None = Query(default=30),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
-    admin: User = Depends(require_permission('stats:read')),
+    admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> RenewalsStatsResponse:
     """Get renewal statistics with period comparison."""
@@ -859,7 +897,7 @@ async def get_addons_stats(
     days: int | None = Query(default=30),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
-    admin: User = Depends(require_permission('stats:read')),
+    admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> AddonsStatsResponse:
     """Get add-on purchase statistics."""
@@ -1015,7 +1053,7 @@ async def get_deposits_stats(
     days: int | None = Query(default=30),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
-    admin: User = Depends(require_permission('stats:read')),
+    admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> DepositsStatsResponse:
     """Get deposit statistics with payment method breakdown."""

@@ -260,6 +260,14 @@ class TelegramStarsMixin:
             logger.error('Не удалось активировать pending подписку пользователя', user_id=user.id)
             return False
 
+        # Consume promo-offer discount (invoice was created with discounted price)
+        try:
+            from app.utils.promo_offer import consume_user_promo_offer
+
+            await consume_user_promo_offer(db, user.id)
+        except Exception as promo_error:
+            logger.warning('Ошибка потребления промо-оффера при Stars оплате', user_id=user.id, error=promo_error)
+
         try:
             from app.services.subscription_service import SubscriptionService
 
@@ -345,6 +353,7 @@ class TelegramStarsMixin:
                     transaction,
                     period_display,
                     was_trial_conversion=False,
+                    purchase_type='renewal' if user.has_had_paid_subscription else 'first_purchase',
                 )
             except Exception as admin_error:  # pragma: no cover - диагностический лог
                 logger.error(
@@ -382,6 +391,11 @@ class TelegramStarsMixin:
         telegram_payment_charge_id: str,
     ) -> bool:
         """Начисляет баланс пользователю после оплаты Stars и запускает автопокупку."""
+
+        # Lock user row to prevent concurrent balance race conditions
+        from app.database.crud.user import lock_user_for_update
+
+        user = await lock_user_for_update(db, user)
 
         # Запоминаем старые значения, чтобы корректно построить уведомления.
         old_balance = user.balance_kopeks
@@ -428,7 +442,7 @@ class TelegramStarsMixin:
                 "❌ Описание '' не подходит для реферальной логики", description_for_referral=description_for_referral
             )
 
-        if was_first_topup and not user.has_made_first_topup:
+        if was_first_topup and not user.has_made_first_topup and not user.referred_by_id:
             user.has_made_first_topup = True
             await db.commit()
 

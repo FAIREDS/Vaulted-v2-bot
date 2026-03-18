@@ -10,6 +10,7 @@ class ReferralInfoResponse(BaseModel):
 
     referral_code: str
     referral_link: str
+    bot_referral_link: str = ''
     total_referrals: int
     active_referrals: int
     total_earnings_kopeks: int
@@ -80,4 +81,5 @@ class ReferralTermsResponse(BaseModel):
     first_topup_bonus_rubles: float
     inviter_bonus_kopeks: int
     inviter_bonus_rubles: float
+    max_commission_payments: int = 0
     partner_section_visible: bool = True

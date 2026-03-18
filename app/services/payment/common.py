@@ -306,96 +306,265 @@ async def send_cart_notification_after_topup(
     from aiogram import types
 
     from app.database.crud.user import get_user_by_id
-    from app.services.subscription_auto_purchase_service import auto_purchase_saved_cart_after_topup
+    from app.services.subscription_auto_purchase_service import (
+        auto_purchase_saved_cart_after_topup,
+        try_auto_extend_expired_after_topup,
+        try_resume_disabled_daily_after_topup,
+    )
 
-    cart_data = await user_cart_service.get_user_cart(user.id)
-    if not cart_data:
-        return False
-
-    cart_total = cart_data.get('total_price', 0)
-    if not cart_total:
-        return False
-
-    # Try auto-purchase first
-    auto_purchase_success = False
+    # Try to resume DISABLED daily subscription immediately (highest priority)
     try:
-        auto_purchase_success = await auto_purchase_saved_cart_after_topup(db, user, bot=bot)
-    except Exception as auto_error:
+        daily_resumed = await try_resume_disabled_daily_after_topup(db, user, bot=bot)
+        if daily_resumed:
+            return False
+    except Exception as daily_error:
         logger.error(
-            'Ошибка автоматической покупки подписки для пользователя',
+            'Ошибка авто-возобновления суточной подписки после пополнения',
             user_id=user.id,
-            auto_error=auto_error,
+            error=daily_error,
             exc_info=True,
         )
 
-    if auto_purchase_success:
-        return False
+    cart_data = await user_cart_service.get_user_cart(user.id)
+    # В приоритете всегда сохраненная корзина: она отражает явный выбор пользователя
+    # (период/тариф/сумма). Автопродление expired — только когда корзины нет.
+    if cart_data:
+        cart_total = cart_data.get('total_price', 0)
+        if not cart_total:
+            logger.warning(
+                'Сохраненная корзина найдена, но total_price отсутствует или некорректен',
+                user_id=user.id,
+                cart_total=cart_total,
+            )
+            return False
 
-    if not bot or not getattr(user, 'telegram_id', None):
-        return False
+        # Try auto-purchase first
+        auto_purchase_success = False
+        try:
+            auto_purchase_success = await auto_purchase_saved_cart_after_topup(db, user, bot=bot)
+        except Exception as auto_error:
+            logger.error(
+                'Ошибка автоматической покупки подписки для пользователя',
+                user_id=user.id,
+                auto_error=auto_error,
+                exc_info=True,
+            )
 
-    # Refresh balance from DB to account for any changes during auto-purchase attempt
-    refreshed_user = await get_user_by_id(db, user.id)
-    balance = getattr(refreshed_user or user, 'balance_kopeks', 0)
+        if auto_purchase_success:
+            return False
 
-    texts = get_texts(getattr(user, 'language', 'ru'))
+        if not bot or not getattr(user, 'telegram_id', None):
+            return False
 
-    # Build message based on whether balance is sufficient
-    fmt = settings.format_price
-    if balance >= cart_total:
-        template = texts.get('BALANCE_TOPPED_UP_CART_SUFFICIENT', '')
-        message_text = template.format(amount=fmt(amount_kopeks), balance=fmt(balance), cart_total=fmt(cart_total))
-    else:
-        missing = cart_total - balance
-        template = texts.get('BALANCE_TOPPED_UP_CART_INSUFFICIENT', '')
-        message_text = template.format(
-            amount=fmt(amount_kopeks),
-            balance=fmt(balance),
-            cart_total=fmt(cart_total),
-            missing=fmt(missing),
-        )
+        # Refresh balance from DB to account for any changes during auto-purchase attempt
+        refreshed_user = await get_user_by_id(db, user.id)
+        balance = getattr(refreshed_user or user, 'balance_kopeks', 0)
 
-    if not message_text:
-        logger.warning('Missing cart notification template', language=getattr(user, 'language', 'ru'))
-        return False
+        texts = get_texts(getattr(user, 'language', 'ru'))
 
-    sent = False
+        # Build message based on whether balance is sufficient
+        fmt = settings.format_price
+        cart_total_formatted = fmt(cart_total)
+        if balance >= cart_total:
+            template = texts.get('BALANCE_TOPPED_UP_CART_SUFFICIENT', '')
+            message_text = template.format(
+                amount=fmt(amount_kopeks),
+                balance=fmt(balance),
+                cart_total=cart_total_formatted,
+                total_amount=cart_total_formatted,
+            )
+        else:
+            missing = cart_total - balance
+            template = texts.get('BALANCE_TOPPED_UP_CART_INSUFFICIENT', '')
+            message_text = template.format(
+                amount=fmt(amount_kopeks),
+                balance=fmt(balance),
+                cart_total=cart_total_formatted,
+                total_amount=cart_total_formatted,
+                missing=fmt(missing),
+            )
+
+        if not message_text:
+            logger.warning('Missing cart notification template', language=getattr(user, 'language', 'ru'))
+            return False
+
+        sent = False
+        try:
+            keyboard = types.InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        types.InlineKeyboardButton(
+                            text=texts.get('RETURN_TO_SUBSCRIPTION_CHECKOUT', '⬅️ Checkout'),
+                            callback_data='return_to_saved_cart',
+                        )
+                    ],
+                    [
+                        types.InlineKeyboardButton(
+                            text=texts.get('MY_BALANCE_BUTTON', '💰 Balance'),
+                            callback_data='menu_balance',
+                        )
+                    ],
+                    [
+                        types.InlineKeyboardButton(
+                            text=texts.get('MAIN_MENU_BUTTON', '🏠 Menu'),
+                            callback_data='back_to_menu',
+                        )
+                    ],
+                ]
+            )
+            await bot.send_message(
+                chat_id=user.telegram_id,
+                text=message_text,
+                reply_markup=keyboard,
+                parse_mode='HTML',
+            )
+            sent = True
+            logger.info('Sent cart notification to user', user_id=user.id)
+        except Exception as send_error:
+            logger.error(
+                'Failed to send cart notification to user',
+                user_id=user.id,
+                error=send_error,
+            )
+
+        return sent
+
+    # Try to auto-extend expired subscription only when there is no saved cart.
     try:
-        keyboard = types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    types.InlineKeyboardButton(
-                        text=texts.get('RETURN_TO_SUBSCRIPTION_CHECKOUT', '⬅️ Checkout'),
-                        callback_data='return_to_saved_cart',
-                    )
-                ],
-                [
-                    types.InlineKeyboardButton(
-                        text=texts.get('MY_BALANCE_BUTTON', '💰 Balance'),
-                        callback_data='menu_balance',
-                    )
-                ],
-                [
-                    types.InlineKeyboardButton(
-                        text=texts.get('MAIN_MENU_BUTTON', '🏠 Menu'),
-                        callback_data='back_to_menu',
-                    )
-                ],
-            ]
-        )
-        await bot.send_message(
-            chat_id=user.telegram_id,
-            text=message_text,
-            reply_markup=keyboard,
-            parse_mode='HTML',
-        )
-        sent = True
-        logger.info('Sent cart notification to user', user_id=user.id)
-    except Exception as send_error:
+        auto_extended = await try_auto_extend_expired_after_topup(db, user, bot=bot)
+        if auto_extended:
+            return False
+    except Exception as extend_error:
         logger.error(
-            'Failed to send cart notification to user',
+            'Ошибка автопродления истёкшей подписки после пополнения',
             user_id=user.id,
-            error=send_error,
+            error=extend_error,
+            exc_info=True,
         )
 
-    return sent
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Guest purchase fulfillment (shared across all payment providers)
+# ---------------------------------------------------------------------------
+
+
+def _extract_guest_purchase_token(metadata: dict[str, Any] | None) -> str | None:
+    """Return the purchase_token if the payment belongs to a guest purchase, else None."""
+    if not isinstance(metadata, dict):
+        return None
+    if metadata.get('purpose') != 'guest_purchase':
+        return None
+    return metadata.get('purchase_token') or None
+
+
+async def try_fulfill_guest_purchase(
+    db: AsyncSession,
+    *,
+    metadata: dict[str, Any] | None,
+    payment_amount_kopeks: int,
+    provider_payment_id: str,
+    provider_name: str,
+    skip_amount_check: bool = False,
+) -> bool | None:
+    """Attempt to fulfill a guest purchase detected in payment metadata.
+
+    Args:
+        skip_amount_check: If True, skip the webhook/purchase amount comparison.
+            Useful for providers like CryptoBot where currency conversion
+            introduces imprecision.
+
+    Returns:
+        ``True``  -- guest purchase was detected and successfully fulfilled.
+        ``False`` -- guest purchase was detected but fulfillment failed.
+        ``None``  -- this is NOT a guest purchase (caller should proceed normally).
+    """
+    purchase_token = _extract_guest_purchase_token(metadata)
+    if purchase_token is None:
+        return None
+
+    from app.database.crud.landing import get_purchase_by_token, update_purchase_status
+    from app.database.models import GuestPurchaseStatus
+    from app.services.guest_purchase_service import fulfill_purchase
+
+    try:
+        existing = await get_purchase_by_token(db, purchase_token)
+
+        # Verify amount (skip for providers with currency conversion imprecision)
+        if existing and not skip_amount_check and payment_amount_kopeks != existing.amount_kopeks:
+            logger.error(
+                'Webhook amount does not match guest purchase amount',
+                webhook_kopeks=payment_amount_kopeks,
+                purchase_kopeks=existing.amount_kopeks,
+                purchase_token_prefix=purchase_token[:5],
+                provider=provider_name,
+            )
+            await update_purchase_status(db, purchase_token, GuestPurchaseStatus.FAILED)
+            return True  # consumed, even though failed
+
+        # Idempotency: skip terminal states
+        if existing and existing.status in (
+            GuestPurchaseStatus.DELIVERED.value,
+            GuestPurchaseStatus.PENDING_ACTIVATION.value,
+            GuestPurchaseStatus.FAILED.value,
+        ):
+            logger.info(
+                'Guest purchase already in terminal state, skipping',
+                purchase_token_prefix=purchase_token[:5],
+                status=existing.status,
+                provider=provider_name,
+            )
+            await db.commit()
+            return True
+
+        # Mark as PAID (no commit -- let fulfill_purchase do atomic commit)
+        await update_purchase_status(
+            db,
+            purchase_token,
+            GuestPurchaseStatus.PAID,
+            commit=False,
+            payment_id=provider_payment_id,
+            paid_at=datetime.now(UTC),
+        )
+
+        # Code-only gifts (is_gift=True, no recipient) stay in PAID status
+        # — buyer shares the code manually, recipient activates via cabinet/bot
+        if existing and existing.is_gift and not existing.gift_recipient_type:
+            await db.commit()
+            logger.info(
+                'Code-only gift marked as PAID, skipping fulfillment',
+                purchase_token_prefix=purchase_token[:5],
+                provider=provider_name,
+            )
+            return True
+
+        # Fulfill: create user, subscription, deliver (commits on success)
+        await fulfill_purchase(db, purchase_token)
+
+        logger.info(
+            'Guest purchase fulfilled',
+            provider_payment_id=provider_payment_id,
+            purchase_token_prefix=purchase_token[:5],
+            provider=provider_name,
+        )
+        return True
+
+    except Exception as guest_error:
+        await db.rollback()
+        logger.exception(
+            'Error fulfilling guest purchase from webhook',
+            provider_payment_id=provider_payment_id,
+            provider=provider_name,
+            error=guest_error,
+        )
+        # Mark as FAILED so it doesn't get retried forever
+        try:
+            await update_purchase_status(
+                db,
+                purchase_token,
+                GuestPurchaseStatus.FAILED,
+            )
+        except Exception:
+            logger.exception('Failed to mark guest purchase as FAILED')
+        return False

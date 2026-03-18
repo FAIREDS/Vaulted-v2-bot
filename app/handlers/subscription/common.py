@@ -3,7 +3,7 @@ import base64
 import html as html_mod
 import re
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -15,7 +15,6 @@ from app.database.models import Subscription, User
 from app.localization.texts import get_texts
 from app.utils.pricing_utils import (
     apply_percentage_discount,
-    get_remaining_months,
 )
 from app.utils.promo_offer import (
     get_user_active_promo_discount_percent,
@@ -57,43 +56,6 @@ def _format_text_with_placeholders(template: str, values: dict[str, Any]) -> str
         return template
 
 
-def _get_addon_discount_percent_for_user(
-    user: User | None,
-    category: str,
-    period_days_hint: int | None = None,
-) -> int:
-    if user is None:
-        return 0
-
-    promo_group = user.get_primary_promo_group()
-    if promo_group is None:
-        return 0
-
-    if not getattr(promo_group, 'apply_discounts_to_addons', True):
-        return 0
-
-    try:
-        return user.get_promo_discount(category, period_days_hint)
-    except AttributeError:
-        return 0
-
-
-def _apply_addon_discount(
-    user: User | None,
-    category: str,
-    amount: int,
-    period_days_hint: int | None = None,
-) -> dict[str, int]:
-    percent = _get_addon_discount_percent_for_user(user, category, period_days_hint)
-    discounted_amount, discount_value = apply_percentage_discount(amount, percent)
-
-    return {
-        'discounted': discounted_amount,
-        'discount': discount_value,
-        'percent': percent,
-    }
-
-
 def _get_promo_offer_discount_percent(user: User | None) -> int:
     return get_user_active_promo_discount_percent(user)
 
@@ -109,14 +71,15 @@ def _apply_promo_offer_discount(user: User | None, amount: int) -> dict[str, int
 
 
 def _get_period_hint_from_subscription(subscription: Subscription | None) -> int | None:
-    if not subscription:
+    if not subscription or not subscription.end_date:
         return None
 
-    months_remaining = get_remaining_months(subscription.end_date)
-    if months_remaining <= 0:
+    now = datetime.now(UTC)
+    days_remaining = (subscription.end_date - now).days
+    if days_remaining <= 0:
         return None
 
-    return months_remaining * 30
+    return days_remaining
 
 
 def _apply_discount_to_monthly_component(
@@ -518,12 +481,15 @@ def get_traffic_switch_keyboard(
     if base_traffic_gb is None:
         base_traffic_gb = current_traffic_gb
 
-    months_multiplier = 1
-    period_text = ''
+    # Считаем по дням (как в кабинете и подтверждении)
     if subscription_end_date:
-        months_multiplier = get_remaining_months(subscription_end_date)
-        if months_multiplier > 1:
-            period_text = f' (за {months_multiplier} мес)'
+        now = datetime.now(UTC)
+        days_left = max(1, (subscription_end_date - now).days)
+        price_multiplier = days_left / 30
+        period_text = f' (за {days_left} дн.)' if days_left > 1 else ' (за 1 день)'
+    else:
+        price_multiplier = 1
+        period_text = ''
 
     packages = settings.get_traffic_packages()
     enabled_packages = [pkg for pkg in packages if pkg['enabled']]
@@ -546,7 +512,7 @@ def get_traffic_switch_keyboard(
         )
 
         price_diff_per_month = discounted_price_per_month - discounted_current_per_month
-        total_price_diff = price_diff_per_month * months_multiplier
+        total_price_diff = int(price_diff_per_month * price_multiplier)
 
         # Сравниваем с базовым трафиком (без докупленного)
         if gb == base_traffic_gb:
@@ -558,7 +524,7 @@ def get_traffic_switch_keyboard(
             action_text = ''
             price_text = f' (+{total_price_diff // 100}₽{period_text})'
             if discount_percent > 0:
-                discount_total = (price_per_month - current_price_per_month) * months_multiplier - total_price_diff
+                discount_total = int((price_per_month - current_price_per_month) * price_multiplier) - total_price_diff
                 if discount_total > 0:
                     price_text += f' (скидка {discount_percent}%: -{discount_total // 100}₽)'
         elif total_price_diff < 0:
